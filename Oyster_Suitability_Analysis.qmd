@@ -1,0 +1,193 @@
+---
+title: "Determining Best EEZ's for Oysters"
+subtitle: "EDS 223 - HW 3"
+author: "Liam Sarmiento"
+date: 2026-11-8
+format:
+    pdf:
+        toc: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+
+## Prepare Data
+
+# Load packages
+```{r}
+library(sf)      
+library(terra)  
+library(tidyverse)
+library(tmap)       
+library(elevatr)  
+library(tigris)   
+library(viridisLite)
+library(glue)
+```
+
+
+```{r}
+# West Coast EEZ
+EEZ <- st_read("data/wc_regions_clean.shp")
+
+# bathymetry raster
+bathymetry <- rast("data/depth.tif")
+
+# SST rasters
+SST2008 <- rast("data/average_annual_sst_2008.tif")
+SST2009 <- rast("data/average_annual_sst_2009.tif")
+SST2010 <- rast("data/average_annual_sst_2010.tif")
+SST2011 <- rast("data/average_annual_sst_2011.tif")
+SST2012 <- rast("data/average_annual_sst_2012.tif")
+SST <- c(SST2008, SST2009, SST2010, SST2011, SST2012)
+```
+
+# Check for CRS match
+
+```{r}
+st_crs(SST) == st_crs(SST2010)
+st_crs(bathymetry) == st_crs(SST)
+st_crs(bathymetry) == st_crs(EEZ)
+```
+
+## Process data
+
+```{r}
+# Mean sst
+mean_sst <- mean(SST, na.rm = TRUE)
+mean_sst <- mean_sst - 273.15
+
+#Crop depth bathymetry
+cropped_depth <- resample(bathymetry, y = mean_sst, method = "bilinear")
+cropped_depth <- project(cropped_depth, mean_sst) # match the resolution of SST 
+
+# Full match of Depth and SST
+stack <- c(mean_sst, cropped_depth)
+```
+
+## Find suitable locations
+
+```{r}
+# Ideal SST between 11-30°C
+sst_mask <- mean_sst
+sst_mask[sst_mask < 11] <- 0
+sst_mask[sst_mask >= 11] <- 1
+sst_mask[sst_mask > 30] <- 0
+
+# Ideal depth between 0-70 meters
+depth_mask <- cropped_depth
+depth_mask[depth_mask >= -70] <- 1
+depth_mask[depth_mask < -70] <- 0
+
+# Combine depth and sst mask
+sst_and_depth <- c(sst_mask, depth_mask)
+names(sst_and_depth) <- c("sst", "depth")
+
+multiply_func <- function(sst, depth) {
+  sst*depth
+}
+
+suitable_raster <- lapp(sst_and_depth, fun = multiply_func)
+```
+
+# Crop suitable areas to EEZ areas
+```{r}
+suitable_raster_cropped <- crop(suitable_raster, EEZ)
+suitable_raster_masked <- mask(suitable_raster, EEZ)
+
+tm_shape(suitable_raster_masked) +
+  tm_raster() +
+tm_shape(EEZ) +
+  tm_borders(lwd = 2) +
+tm_title(text = "Cropped")
+```
+
+## Determine the most suitable EEZ
+
+# Find area of grid cells
+```{r}
+#Changes EEZ from vector into raster
+eez_raster <- as.factor(rasterize(EEZ, suitable_raster, field = "rgn_id"))
+
+area <- cellSize(eez_raster, unit = "km")
+
+suitable_area <- lapp(c(area, suitable_raster), fun = function(a,s) a*s)
+suitable_area_eez <- zonal(suitable_area, eez_raster, fun = 'sum', na.rm = TRUE, as.raster = TRUE)
+names(suitable_area_eez) <- "Suitable Area (km^2)"
+```
+
+
+# Final map
+```{r}
+tm_shape(suitable_area_eez) +
+  tm_raster() +
+  tm_basemap('OpenStreetMap') +
+  tm_title(glue("Oyster Suitable Area Amounts in EEZ zones")) +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(position = c("left", "top"))
+```
+
+This map shows that the best EEZ for oyster cultivation is around the coast from Sacramento to Bakersfield. Darker blue indicates higher suitability for oyster cultivation based on temperature and depth.
+
+## Function for chosen species
+
+Chosen species: Pacific oyster
+Ideal range: 0 - 40 meters, −1.8 to 35 °C.
+```{r}
+OysterSuitabiliyFunc <- function(TempMin, TempMax, DepthMin, DepthMax, Species) {
+  #Find suitable locations
+  # Ideal SST between TempMin and TempMax
+sst_mask <- mean_sst
+sst_mask[sst_mask < TempMin] <- 0
+sst_mask[sst_mask >= TempMin] <- 1
+sst_mask[sst_mask > TempMax] <- 0
+
+# Ideal depth between DepthMin and DepthMax
+depth_mask <- cropped_depth
+depth_mask[depth_mask > DepthMin] <- 0
+depth_mask[depth_mask <= DepthMin] <- 1
+depth_mask[depth_mask < DepthMax] <- 0
+
+# Combine depth and sst mask
+sst_and_depth <- c(sst_mask, depth_mask)
+names(sst_and_depth) <- c("sst", "depth")
+
+multiply_func <- function(sst, depth) {
+  sst*depth
+}
+
+suitable_raster <- lapp(sst_and_depth, fun = multiply_func)
+
+# Crop suitable areas to EEZ areas
+suitable_raster_cropped <- crop(suitable_raster, EEZ)
+suitable_raster_masked <- mask(suitable_raster, EEZ)
+
+#Changes EEZ from vector into raster
+eez_raster <- as.factor(rasterize(EEZ, suitable_raster, field = "rgn_id"))
+
+# Find area for each EEZ
+area <- cellSize(eez_raster, unit = "km")
+
+suitable_area <- lapp(c(area, suitable_raster), fun = function(a,s) a*s)
+suitable_area_eez <- zonal(suitable_area, eez_raster, fun = 'sum', na.rm = TRUE, as.raster = TRUE)
+names(suitable_area_eez) <- "Suitable Area (km^2)"
+
+#Final map creation
+tm_shape(suitable_area_eez) +
+  tm_raster() +
+  tm_basemap('OpenStreetMap') +
+  tm_title(glue("Suitable Area Amounts in EEZ's for {Species}")) +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(position = c("left", "top"))
+}
+```
+
+# Running function for the Pacific Oyster
+```{r}
+OysterSuitabiliyFunc(-1.8, 35, 0, -40, "Pacific oyster")
+```
+
+For the Pacific Oyster's ideal range of 0 - 40 meters and temperature range of −1.8 to 35 °C, we can see that best place for cultivation seems to be from the Sacramento coast all the way down to San Diego.
